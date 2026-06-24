@@ -13,11 +13,9 @@ typedef struct {
 } ShellState;
 
 // Processador de Comandos do Interpretador
-// Processador de Comandos do Interpretador
 void execute_command(char *line, ShellState *state) {
     // 1. CORREÇÃO CRÍTICA: Remove tanto o \n quanto o \r
     line[strcspn(line, "\r\n")] = 0;
-
     if (strlen(line) == 0) return; // Se for linha vazia, apenas ignora
 
     // 2. CORREÇÃO: Usa \r e \n no delimitador do strtok por segurança
@@ -31,7 +29,7 @@ void execute_command(char *line, ShellState *state) {
     }
 
     char *cmd = args[0];
-
+    
     // --- Tratamento dos Comandos ---
     if (strcmp(cmd, "help") == 0) {
         printf("Comandos Suportados:\n");
@@ -43,11 +41,14 @@ void execute_command(char *line, ShellState *state) {
         printf("  exit        - Fecha o interpretador\n");
         printf("  info        - Informacoes do sistema de arquivos\n");
         printf("  attr <nome> - Exibe atributos de arquivo ou diretorio\n");
+        printf("  testi <num> - Verifica se um inode esta livre ou ocupado\n");
+        printf("  testb <num> - Verifica se um bloco esta livre ou ocupado\n");
     } 
     else if (strcmp(cmd, "ls") == 0) {
         // 3. CORREÇÃO: Agora o 'ls' aceita argumentos (ex: ls fotos)
         if (arg_count == 1) {
-            ext4_readdir(state->current_inode); // ls normal
+            ext4_readdir(state->current_inode);
+            // ls normal
         } else {
             uint32_t target_inode = ext4_lookup(state->current_inode, args[1]);
             if (target_inode == 0) {
@@ -68,9 +69,9 @@ void execute_command(char *line, ShellState *state) {
             printf("Erro: O diretório '%s' não existe.\n", args[1]);
         } else {
             state->current_inode = target_inode;
-            
             if (strcmp(args[1], "..") == 0) {
-                strcpy(state->current_path, "/"); // Simplificação ao voltar
+                strcpy(state->current_path, "/");
+                // Simplificação ao voltar
             } else if (strcmp(args[1], ".") != 0) {
                 if (strcmp(state->current_path, "/") != 0) {
                     strcat(state->current_path, "/");
@@ -112,6 +113,22 @@ void execute_command(char *line, ShellState *state) {
     else if (strcmp(cmd, "clear") == 0) {
         printf("\033[H\033[J");
     } 
+    else if (strcmp(cmd, "testi") == 0) {
+        if (arg_count < 2) {
+            printf("Uso: testi <numero_do_inode>\n");
+            return;
+        }
+        uint32_t inode_num = (uint32_t)atoi(args[1]);
+        ext4_testi(inode_num);
+    }
+    else if (strcmp(cmd, "testb") == 0) {
+        if (arg_count < 2) {
+            printf("Uso: testb <numero_do_bloco>\n");
+            return;
+        }
+        uint32_t block_num = (uint32_t)atoi(args[1]);
+        ext4_testb(block_num);
+    }
     else if (strcmp(cmd, "exit") == 0) {
         printf("Fechando interpretador EXT4. Até mais!\n");
         exit(0);
@@ -153,7 +170,8 @@ int main(int argc, char *argv[]) {
 
         // Captura o comando do usuário de forma segura sem estourar o buffer
         if (fgets(input_buffer, sizeof(input_buffer), stdin) == NULL) {
-            break; // Sai se pressionado Ctrl+D (EOF)
+            break;
+            // Sai se pressionado Ctrl+D (EOF)
         }
 
         execute_command(input_buffer, &state);
