@@ -13,37 +13,49 @@ typedef struct {
 } ShellState;
 
 // Processador de Comandos do Interpretador
+// Processador de Comandos do Interpretador
 void execute_command(char *line, ShellState *state) {
-    // Remove a quebra de linha '\n' capturada pelo fgets
-    line[strcspn(line, "\n")] = 0;
+    // 1. CORREÇÃO CRÍTICA: Remove tanto o \n quanto o \r
+    line[strcspn(line, "\r\n")] = 0;
 
     if (strlen(line) == 0) return; // Se for linha vazia, apenas ignora
 
-    // Divide a entrada em comando e argumentos usando espaço como delimitador
+    // 2. CORREÇÃO: Usa \r e \n no delimitador do strtok por segurança
     char *args[MAX_ARGS];
     int arg_count = 0;
     
-    char *token = strtok(line, " ");
+    char *token = strtok(line, " \r\n");
     while (token != NULL && arg_count < MAX_ARGS) {
         args[arg_count++] = token;
-        token = strtok(NULL, " ");
+        token = strtok(NULL, " \r\n");
     }
 
     char *cmd = args[0];
 
     // --- Tratamento dos Comandos ---
-    
     if (strcmp(cmd, "help") == 0) {
-        printf("Comandos Suportados (Sintaxe Simplificada):\n");
-        printf("  ls          - Lista arquivos e subdiretórios da pasta atual\n");
-        printf("  cd <nome>   - Entra em um diretório (Ex: cd fotos_pasta ou cd ..)\n");
-        printf("  cat <nome>  - Mostra o conteúdo de um arquivo (Ex: cat documento.txt)\n");
-        printf("  pwd         - Exibe o caminho do diretório atual\n");
+        printf("Comandos Suportados:\n");
+        printf("  ls [pasta]  - Lista arquivos do diretorio atual ou da pasta informada\n");
+        printf("  cd <nome>   - Entra em um diretorio\n");
+        printf("  cat <nome>  - Mostra o conteudo de um arquivo\n");
+        printf("  pwd         - Exibe o caminho do diretorio atual\n");
         printf("  clear       - Limpa o terminal\n");
         printf("  exit        - Fecha o interpretador\n");
+        printf("  info        - Informacoes do sistema de arquivos\n");
+        printf("  attr <nome> - Exibe atributos de arquivo ou diretorio\n");
     } 
     else if (strcmp(cmd, "ls") == 0) {
-        ext4_readdir(state->current_inode);
+        // 3. CORREÇÃO: Agora o 'ls' aceita argumentos (ex: ls fotos)
+        if (arg_count == 1) {
+            ext4_readdir(state->current_inode); // ls normal
+        } else {
+            uint32_t target_inode = ext4_lookup(state->current_inode, args[1]);
+            if (target_inode == 0) {
+                printf("Erro: Diretório '%s' não encontrado.\n", args[1]);
+            } else {
+                ext4_readdir(target_inode);
+            }
+        }
     } 
     else if (strcmp(cmd, "cd") == 0) {
         if (arg_count < 2) {
@@ -57,7 +69,6 @@ void execute_command(char *line, ShellState *state) {
         } else {
             state->current_inode = target_inode;
             
-            // Atualiza a string do caminho na tela de forma simplificada
             if (strcmp(args[1], "..") == 0) {
                 strcpy(state->current_path, "/"); // Simplificação ao voltar
             } else if (strcmp(args[1], ".") != 0) {
@@ -67,20 +78,39 @@ void execute_command(char *line, ShellState *state) {
                 strcat(state->current_path, args[1]);
             }
         }
-    } 
+    }
+    else if (strcmp(cmd, "attr") == 0) {
+        if (arg_count < 2) {
+            printf("Uso: attr <nome_do_arquivo_ou_diretorio>\n");
+            return;
+        }
+        uint32_t target_inode = ext4_lookup(state->current_inode, args[1]);
+        if (target_inode == 0) {
+            printf("Erro: Arquivo ou diretório '%s' não encontrado.\n", args[1]);
+        } else {
+            ext4_attr(target_inode);
+        }
+    }
     else if (strcmp(cmd, "cat") == 0) {
         if (arg_count < 2) {
             printf("Uso: cat <nome_do_arquivo>\n");
             return;
         }
         uint32_t file_inode = ext4_lookup(state->current_inode, args[1]);
-        ext4_cat(file_inode);
+        if (file_inode == 0) {
+            printf("Erro: Arquivo '%s' não encontrado.\n", args[1]);
+        } else {
+            ext4_cat(file_inode);
+        }
     } 
+    else if (strcmp(cmd, "info") == 0) {
+        ext4_show_info();
+    }
     else if (strcmp(cmd, "pwd") == 0) {
         printf("%s\n", state->current_path);
     } 
     else if (strcmp(cmd, "clear") == 0) {
-        printf("\033[H\033[J"); // Limpa a tela usando código de escape ANSI (Nativo)
+        printf("\033[H\033[J");
     } 
     else if (strcmp(cmd, "exit") == 0) {
         printf("Fechando interpretador EXT4. Até mais!\n");
