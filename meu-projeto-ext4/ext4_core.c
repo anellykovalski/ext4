@@ -367,3 +367,115 @@ void ext4_attr(uint32_t inode_num) {
     printf("Última Modificação (mtime): %u\n", inode.i_mtime);
     printf("----------------------------------------\n\n");
 }
+
+// Verifica se um inode está livre ou ocupado
+void ext4_testi(uint32_t inode_num) {
+    if (!disk_image) {
+        printf("Erro: Nenhuma imagem de disco aberta.\n");
+        return;
+    }
+    if (inode_num == 0) {
+        printf("Erro: O Inode 0 não é válido no EXT4.\n");
+        return;
+    }
+
+    uint32_t inodes_per_group;
+    uint16_t desc_size;
+
+    // Lendo a quantidade de inodes por grupo (Offset 40 do Superbloco)
+    fseek(disk_image, 1024 + 40, SEEK_SET);
+    fread(&inodes_per_group, sizeof(uint32_t), 1, disk_image);
+
+    // Lendo o tamanho do descritor de grupo (Offset 254 do Superbloco)
+    fseek(disk_image, 1024 + 254, SEEK_SET);
+    fread(&desc_size, sizeof(uint16_t), 1, disk_image);
+    if (desc_size < 32 || desc_size > 1024) desc_size = 32;
+
+    // Calculando em qual grupo o Inode está e seu índice dentro do bitmap
+    uint32_t group = (inode_num - 1) / inodes_per_group;
+    uint32_t index = (inode_num - 1) % inodes_per_group;
+
+    // Encontrando o descritor de grupo (BGDT)
+    uint64_t bgdt_offset = (global_block_size == 1024) ? 2048 : global_block_size;
+    uint64_t descriptor_offset = bgdt_offset + (group * desc_size);
+
+    // Lendo o bloco do Inode Bitmap (Fica nos primeiros 4 bytes de offset do Descritor = bytes 4 a 7)
+    uint32_t inode_bitmap_block;
+    fseek(disk_image, descriptor_offset + 4, SEEK_SET);
+    fread(&inode_bitmap_block, sizeof(uint32_t), 1, disk_image);
+
+    // Lendo o bloco do bitmap inteiro para a memória
+    char *block_buffer = malloc(global_block_size);
+    read_block(inode_bitmap_block, block_buffer);
+
+    // Verificando o bit específico
+    uint8_t byte_val = block_buffer[index / 8];
+    uint8_t bit_pos = index % 8;
+
+    if (byte_val & (1 << bit_pos)) {
+        printf("Inode %u: OCUPADO\n", inode_num);
+    } else {
+        printf("Inode %u: LIVRE\n", inode_num);
+    }
+
+    free(block_buffer);
+}
+
+// Verifica se um bloco de dados está livre ou ocupado
+void ext4_testb(uint32_t block_num) {
+    if (!disk_image) {
+        printf("Erro: Nenhuma imagem de disco aberta.\n");
+        return;
+    }
+
+    uint32_t blocks_per_group;
+    uint32_t first_data_block;
+    uint16_t desc_size;
+
+    // Lendo a quantidade de blocos por grupo (Offset 32 do Superbloco)
+    fseek(disk_image, 1024 + 32, SEEK_SET);
+    fread(&blocks_per_group, sizeof(uint32_t), 1, disk_image);
+
+    // Lendo o primeiro bloco de dados (Offset 20 do Superbloco)
+    fseek(disk_image, 1024 + 20, SEEK_SET);
+    fread(&first_data_block, sizeof(uint32_t), 1, disk_image);
+
+    // Lendo o tamanho do descritor de grupo
+    fseek(disk_image, 1024 + 254, SEEK_SET);
+    fread(&desc_size, sizeof(uint16_t), 1, disk_image);
+    if (desc_size < 32 || desc_size > 1024) desc_size = 32;
+
+    if (block_num < first_data_block) {
+        printf("Erro: O bloco %u é um bloco reservado do sistema.\n", block_num);
+        return;
+    }
+
+    // Calculando em qual grupo o bloco está e seu índice dentro do bitmap
+    uint32_t group = (block_num - first_data_block) / blocks_per_group;
+    uint32_t index = (block_num - first_data_block) % blocks_per_group;
+
+    // Encontrando o descritor de grupo (BGDT)
+    uint64_t bgdt_offset = (global_block_size == 1024) ? 2048 : global_block_size;
+    uint64_t descriptor_offset = bgdt_offset + (group * desc_size);
+
+    // Lendo o bloco do Block Bitmap (Fica no comecinho do Descritor = offset 0 a 3)
+    uint32_t block_bitmap_block;
+    fseek(disk_image, descriptor_offset + 0, SEEK_SET);
+    fread(&block_bitmap_block, sizeof(uint32_t), 1, disk_image);
+
+    // Lendo o bloco do bitmap para a memória
+    char *block_buffer = malloc(global_block_size);
+    read_block(block_bitmap_block, block_buffer);
+
+    // Verificando o bit
+    uint8_t byte_val = block_buffer[index / 8];
+    uint8_t bit_pos = index % 8;
+
+    if (byte_val & (1 << bit_pos)) {
+        printf("Bloco %u: OCUPADO\n", block_num);
+    } else {
+        printf("Bloco %u: LIVRE\n", block_num);
+    }
+
+    free(block_buffer);
+}
