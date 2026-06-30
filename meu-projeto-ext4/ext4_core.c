@@ -732,94 +732,82 @@ void ext4_attr(uint32_t inode_num) {
 }
 
 void ext4_testi(uint32_t inode_num) {
-    uint32_t inodes_per_group = get_inodes_per_group();
-    uint32_t group;
-    uint32_t index;
-    uint64_t inode_bitmap_block;
-    unsigned char *block_buffer;
-
-    if (!disk_image) {
-        printf("Erro: Nenhuma imagem de disco aberta.\n");
+    if (inode_num == 0) {
+        printf("Erro: O Inode 0 não é válido no EXT4.\n");
         return;
     }
 
-    if (inode_num == 0 || inodes_per_group == 0) {
-        printf("Erro: inode invalido.\n");
+    struct ext4_inode inode;
+    
+    // Tenta ler o inode usando a sua função que já sabemos que funciona
+    if (!read_inode(inode_num, &inode)) {
+        printf("Resultado: Inode %u esta LIVRE (ou fora dos limites)\n", inode_num);
         return;
     }
 
-    group = (inode_num - 1) / inodes_per_group;
-    index = (inode_num - 1) % inodes_per_group;
-
-    inode_bitmap_block = read_group_block_pointer(group, 4, 0x24);
-
-    if (inode_bitmap_block == 0) {
-        printf("Erro ao localizar bitmap de inodes.\n");
-        return;
+    // Se o modo de arquivo for 0 e ele não tiver links, o inode está vazio/livre
+    if (inode.i_mode == 0 && inode.i_links_count == 0) {
+        printf("Resultado: Inode %u esta LIVRE\n", inode_num);
+    } else {
+        printf("Resultado: Inode %u esta OCUPADO\n", inode_num);
     }
-
-    block_buffer = malloc(global_block_size);
-    if (!block_buffer) {
-        printf("Erro de alocacao de memoria.\n");
-        return;
-    }
-
-    if (!read_block(inode_bitmap_block, block_buffer)) {
-        free(block_buffer);
-        printf("Erro ao ler bitmap de inodes.\n");
-        return;
-    }
-
-    printf("Inode %u: %s\n", inode_num,
-           (block_buffer[index / 8] & (1U << (index % 8))) ?
-           "OCUPADO" : "LIVRE");
-
-    free(block_buffer);
 }
 
 void ext4_testb(uint32_t block_num) {
-    uint32_t blocks_per_group = get_blocks_per_group();
-    uint32_t first_data_block = get_first_data_block();
-    uint32_t group;
-    uint32_t index;
-    uint64_t block_bitmap_block;
-    unsigned char *block_buffer;
-
     if (!disk_image) {
         printf("Erro: Nenhuma imagem de disco aberta.\n");
         return;
     }
 
-    if (blocks_per_group == 0 || block_num < first_data_block) {
-        printf("Erro: bloco invalido.\n");
+    uint32_t blocks_per_group;
+    uint32_t first_data_block;
+    uint32_t total_blocks;
+    uint16_t desc_size;
+
+    // Lendo o total de blocos para validação (Offset 4 do Superbloco)
+    fseek(disk_image, 1024 + 4, SEEK_SET);
+    fread(&total_blocks, sizeof(uint32_t), 1, disk_image);
+
+    // Lendo a quantidade de blocos por grupo (Offset 32)
+    fseek(disk_image, 1024 + 32, SEEK_SET);
+    fread(&blocks_per_group, sizeof(uint32_t), 1, disk_image);
+
+    // Lendo o primeiro bloco de dados (Offset 20)
+    fseek(disk_image, 1024 + 20, SEEK_SET);
+    fread(&first_data_block, sizeof(uint32_t), 1, disk_image);
+
+    if (block_num < first_data_block || block_num >= total_blocks) {
+        printf("Erro: Bloco %u é invalido (Validos: %u a %u).\n", 
+               block_num, first_data_block, total_blocks - 1);
         return;
     }
 
-    group = (block_num - first_data_block) / blocks_per_group;
-    index = (block_num - first_data_block) % blocks_per_group;
+    fseek(disk_image, 1024 + 254, SEEK_SET);
+    fread(&desc_size, sizeof(uint16_t), 1, disk_image);
+    if (desc_size < 32 || desc_size > 1024) desc_size = 32;
 
-    block_bitmap_block = read_group_block_pointer(group, 0, 0x20);
+    uint32_t group = (block_num - first_data_block) / blocks_per_group;
+    uint32_t index = (block_num - first_data_block) % blocks_per_group;
 
-    if (block_bitmap_block == 0) {
-        printf("Erro ao localizar bitmap de blocos.\n");
-        return;
+    uint64_t bgdt_offset = (global_block_size == 1024) ? 2048 : global_block_size;
+    uint64_t descriptor_offset = bgdt_offset + (group * desc_size);
+
+    uint32_t block_bitmap_block;
+    fseek(disk_image, descriptor_offset + 0, SEEK_SET);
+    fread(&block_bitmap_block, sizeof(uint32_t), 1, disk_image);
+
+    // Usando calloc para limpar lixo de memória
+    char *block_buffer = calloc(1, global_block_size);
+    read_block(block_bitmap_block, block_buffer);
+
+    uint8_t byte_val = block_buffer[index / 8];
+    uint8_t bit_pos = index % 8;
+
+    if (byte_val & (1 << bit_pos)) {
+        printf("Resultado: Bloco %u esta OCUPADO\n", block_num);
+    } else {
+        printf("Resultado: Bloco %u esta LIVRE\n", block_num);
     }
-
-    block_buffer = malloc(global_block_size);
-    if (!block_buffer) {
-        printf("Erro de alocacao de memoria.\n");
-        return;
-    }
-
-    if (!read_block(block_bitmap_block, block_buffer)) {
-        free(block_buffer);
-        printf("Erro ao ler bitmap de blocos.\n");
-        return;
-    }
-
-    printf("Bloco %u: %s\n", block_num,
-           (block_buffer[index / 8] & (1U << (index % 8))) ?
-           "OCUPADO" : "LIVRE");
 
     free(block_buffer);
 }
