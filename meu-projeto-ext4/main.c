@@ -21,7 +21,7 @@ void execute_command(char *line, ShellState *state) {
     // 2. CORREÇÃO: Usa \r e \n no delimitador do strtok por segurança
     char *args[MAX_ARGS];
     int arg_count = 0;
-    
+
     char *token = strtok(line, " \r\n");
     while (token != NULL && arg_count < MAX_ARGS) {
         args[arg_count++] = token;
@@ -29,7 +29,7 @@ void execute_command(char *line, ShellState *state) {
     }
 
     char *cmd = args[0];
-    
+
     // --- Tratamento dos Comandos ---
     if (strcmp(cmd, "help") == 0) {
         printf("Comandos Suportados:\n");
@@ -43,6 +43,7 @@ void execute_command(char *line, ShellState *state) {
         printf("  attr <nome> - Exibe atributos de arquivo ou diretorio\n");
         printf("  testi <num> - Verifica se um inode esta livre ou ocupado\n");
         printf("  testb <num> - Verifica se um bloco esta livre ou ocupado\n");
+        printf("  export <src> <tgt> - Copia um arquivo da imagem EXT4 para a maquina real\n");
     } 
     else if (strcmp(cmd, "ls") == 0) {
         ext4_readdir(state->current_inode);
@@ -93,6 +94,22 @@ void execute_command(char *line, ShellState *state) {
             ext4_cat(file_inode);
         }
     } 
+    else if (strcmp(cmd, "export") == 0) {
+        if (arg_count < 3) {
+            printf("Uso: export <arquivo_origem_na_imagem> <caminho_destino_no_seu_pc>\n");
+            return;
+        }
+
+        // Procura o arquivo dentro do diretório que o shell está atualmente
+        uint32_t source_inode = ext4_lookup(state->current_inode, args[1]);
+
+        if (source_inode == 0) {
+            printf("Erro: Arquivo '%s' nao encontrado no diretorio atual da imagem.\n", args[1]);
+        } else {
+            // Chama a função passando o Inode encontrado e o caminho alvo
+            ext4_export(source_inode, args[2]);
+        }
+    }
     else if (strcmp(cmd, "info") == 0) {
         ext4_show_info();
     }
@@ -122,9 +139,6 @@ void execute_command(char *line, ShellState *state) {
         printf("Fechando interpretador EXT4. Até mais!\n");
         exit(0);
     } 
-    else if (strcmp(cmd, "god") == 0) {
-        ext4_god_mode();
-    }
     else {
         printf("Comando desconhecido: '%s'. Digite 'help' para comandos válidos.\n", cmd);
     }

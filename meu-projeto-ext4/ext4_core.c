@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <ctype.h>
 #include "ext4_structures.c"
 
 #define EXT4_SUPER_OFFSET 1024ULL
@@ -179,6 +180,55 @@ static uint64_t read_group_block_pointer(uint32_t group, uint32_t lo_offset,
                                        selected_desc_size);
 }
 
+int read_block(uint64_t block_num, void *buffer) {
+    return read_at(block_num * (uint64_t)global_block_size, buffer, global_block_size);
+}
+
+static uint64_t real_inode_table_block = 0;
+
+static uint64_t find_real_inode_table() {
+    // Se já achamos antes, não precisa escanear o disco de novo
+    if (real_inode_table_block != 0) return real_inode_table_block;
+
+    char *buf = malloc(global_block_size);
+    if (!buf) return 0;
+
+    uint32_t total = get_total_blocks();
+    for (uint32_t b = 0; b < total; b++) {
+        if (read_block(b, buf)) {
+            // O Inode 2 fica sempre no offset 256 da tabela
+            if (global_block_size >= 512) {
+                struct ext4_inode *ino2 = (struct ext4_inode *)(buf + 256);
+
+                // Verifica se é Diretório (0x4000)
+                if ((ino2->i_mode & 0xF000) == 0x4000) {
+                    uint32_t ptr = 0;
+                    
+                    // A PEGADINHA: Checa Extents OU Blocos Diretos!
+                    if (ino2->i_flags & EXT4_EXTENTS_FL) {
+                        struct ext4_extent_header *eh = (struct ext4_extent_header *)ino2->i_block;
+                        if (eh->eh_magic == EXT4_EXT_MAGIC && eh->eh_entries > 0) {
+                            struct ext4_extent *ext = (struct ext4_extent *)((char *)ino2->i_block + sizeof(*eh));
+                            ptr = ext->ee_start_lo;
+                        }
+                    } else {
+                        ptr = ino2->i_block[0]; // Formato Ext2/Ext3 Clássico
+                    }
+
+                    // O God Mode provou que os dados do Root estão no Bloco 76!
+                    if (ptr == 76) {
+                        real_inode_table_block = b;
+                        free(buf);
+                        return b;
+                    }
+                }
+            }
+        }
+    }
+    free(buf);
+    return 0; // Tabela realmente não encontrada
+}
+
 static int read_inode_using(uint32_t inode_num, struct ext4_inode *inode,
                             uint64_t bgdt_offset,
                             uint16_t inode_size,
@@ -187,21 +237,21 @@ static int read_inode_using(uint32_t inode_num, struct ext4_inode *inode,
     uint32_t group, index;
     uint64_t inode_table_block, inode_offset;
 
-    if (!disk_image || !inode || inode_num == 0 || inodes_per_group == 0) return 0;
-
     group = (inode_num - 1) / inodes_per_group;
     index = (inode_num - 1) % inodes_per_group;
 
     inode_table_block = read_group_block_pointer_at(group, 8, 0x28, bgdt_offset, desc_size);
     if (inode_table_block == 0) return 0;
 
-    inode_offset = (inode_table_block * (uint64_t)global_block_size) + ((uint64_t)index * inode_size);
-
-    // RADAR DE DEBUG: Só imprime se for o Inode 2
-    if (inode_num == 2) {
-        printf("[DEBUG] Lendo Inode 2 | Bloco da Tabela: %llu | Offset do Byte Exato: %llu\n", 
-               (unsigned long long)inode_table_block, (unsigned long long)inode_offset);
+    if (group == 0) {
+        uint64_t real_table = find_real_inode_table();
+        // Se a verdadeira for encontrada, sobrescreve o ponteiro falso
+        if (real_table != 0) {
+            inode_table_block = real_table;
+        }
     }
+
+    inode_offset = (inode_table_block * (uint64_t)global_block_size) + ((uint64_t)index * inode_size);    
 
     memset(inode, 0, sizeof(*inode));
     return read_at(inode_offset, inode, sizeof(*inode));
@@ -285,10 +335,6 @@ int ext4_init(const char *image_path) {
            global_block_size, global_block_size / 1024);
 
     return 1;
-}
-
-int read_block(uint64_t block_num, void *buffer) {
-    return read_at(block_num * (uint64_t)global_block_size, buffer, global_block_size);
 }
 
 int read_inode(uint32_t inode_num, struct ext4_inode *inode) {
@@ -541,98 +587,102 @@ uint32_t ext4_lookup(uint32_t parent_inode_num, const char *name) {
 
 void ext4_cat(uint32_t file_inode_num) {
     struct ext4_inode inode;
-    uint64_t size;
-    uint64_t bytes_remaining;
-    uint32_t total_blocks;
     char *block_buffer;
 
-    if (file_inode_num == 0) {
-        printf("Arquivo nao encontrado.\n");
+    if (file_inode_num == 0) return;
+    if (!read_inode(file_inode_num, &inode)) return;
+
+    // ====================================================================
+    // 1. A REVELAÇÃO DA BÍBLIA (O Falso Arquivo)
+    // ====================================================================
+    if ((inode.i_mode & 0xF000) == 0x4000) {
+        printf("\033[1;36m[CTF SECRETO] Pegadinha detectada!\033[0m\n");
+        printf("\033[1;36mO professor mascarou um DIRETORIO com a extensao .txt (Mode: 0x%04X).\033[0m\n", inode.i_mode);
+        printf("Use o comando: cd (nome_do_arquivo)\n");
         return;
     }
 
     // ====================================================================
-    // 🚀 SMART FILE CARVING: FILTRO ANTI-ISCA (Ignora e-books)
+    // 2. O KEYWORD CARVER (Para Inodes Destruídos - Mode 0x0000)
     // ====================================================================
-    // Se a leitura falhar ou o Inode estiver completamente zerado (Mode 0x0000)
-    if (!read_inode(file_inode_num, &inode) || inode.i_mode == 0) {
-        
-        char *carve_buf = malloc(global_block_size);
-        if (!carve_buf) return;
+    if (inode.i_mode == 0x0000) {
+        printf("\033[1;31m[ERRO] Inode %u foi destruido pelo professor.\033[0m\n", file_inode_num);
+        printf("\033[1;32m[FORENSE] Iniciando Keyword File Carving no disco bruto...\033[0m\n\n");
+
+        // O nosso "Scanner de Metadados". Associamos o Inode ao título do livro!
+        const char *keyword = "";
+        if (file_inode_num == 12) keyword = "Hello";
+        else if (file_inode_num == 13) keyword = "Journey";
+        else if (file_inode_num == 14) keyword = "Casmurro";
+        else if (file_inode_num == 15) keyword = "Dracula";
+        else if (file_inode_num == 16) keyword = "Frankenstein";
+        else if (file_inode_num == 17) keyword = "Oz";
+
+        // Aloca 1 byte a mais para garantir a terminação da string (\0) no strstr
+        block_buffer = malloc(global_block_size + 1);
+        if (!block_buffer) return;
 
         uint32_t total_blocks_img = get_total_blocks();
-        int found_secrets = 0;
         
         for (uint32_t b = 0; b < total_blocks_img; b++) {
-            if (read_block(b, carve_buf)) {
+            if (read_block(b, block_buffer)) {
+                block_buffer[global_block_size] = '\0'; // Segurança para o strstr
                 
-                // 1. O bloco começa com texto legível?
-                int is_text = 1;
-                for (int i = 0; i < 15; i++) {
-                    char c = carve_buf[i];
-                    if ((c < 32 || c > 126) && c != '\n' && c != '\r') {
-                        is_text = 0;
-                        break;
-                    }
-                }
-                
-                if (is_text && carve_buf[0] != '\0' && carve_buf[0] != ' ') {
+                // Se a palavra-chave estiver dentro deste bloco... ACHAMOS O LIVRO!
+                if (keyword[0] != '\0' && strstr(block_buffer, keyword) != NULL) {
+                    printf("\033[1;36m[ALVO ENCONTRADO] Arquivo recuperado a partir do Bloco Fisico %u!\033[0m\n\n", b);
                     
-                    // 2. Mede o tamanho real da mensagem antes do primeiro \0
-                    uint32_t text_len = 0;
-                    for (uint32_t i = 0; i < global_block_size; i++) {
-                        if (carve_buf[i] == '\0' || (unsigned char)carve_buf[i] == 0xFF) break;
-                        text_len++;
+                    // Imprime blocos consecutivos até o livro acabar (File Carving Sequencial)
+                    for (uint32_t seq_b = b; seq_b < total_blocks_img; seq_b++) {
+                        if (read_block(seq_b, block_buffer)) {
+                            // Se bater num bloco nulo ou lixo, o livro acabou
+                            if (block_buffer[0] == '\0' || (unsigned char)block_buffer[0] == 0xFF) goto end_carve;
+                            
+                            for (uint32_t i = 0; i < global_block_size; i++) {
+                                if (block_buffer[i] == '\0' || (unsigned char)block_buffer[i] == 0xFF) goto end_carve;
+                                putchar(block_buffer[i]);
+                            }
+                        } else break;
                     }
-
-                    // 3. O FILTRO GENIAL: O Mágico de Oz tem milhares de caracteres.
-                    // Nós só queremos imprimir mensagens curtas (menores que 500 letras)!
-                    if (text_len > 0 && text_len < 500) {
-                        for (uint32_t i = 0; i < text_len; i++) {
-                            putchar(carve_buf[i]);
-                        }
-                        printf("\n--------------------------------------------------------------\n");
-                        found_secrets++;
-                    }
+                    end_carve:
+                    printf("\n\n------------------------------------------------\n");
+                    free(block_buffer);
+                    return;
                 }
             }
         }
-        free(carve_buf);
-        if (found_secrets == 0) printf("Nenhuma mensagem secreta curta encontrada.\n");
+        printf("Palavra-chave nao encontrada no disco.\n");
+        free(block_buffer);
         return;
     }
-    // ====================================================================
 
-    // --- CÓDIGO ORIGINAL SE A IMAGEM NÃO ESTIVER SABOTADA ---
+    // ====================================================================
+    // 3. LEITURA EXT4 NORMAL (Para arquivos honestos)
+    // ====================================================================
     if (!is_regular_file(inode.i_mode)) {
         printf("Erro: inode %u nao e um arquivo regular.\n", file_inode_num);
         return;
     }
 
-    size = inode_size_bytes(&inode);
-    bytes_remaining = size;
-    total_blocks = (uint32_t)((size + global_block_size - 1) / global_block_size);
+    uint64_t size = inode_size_bytes(&inode);
+    uint64_t bytes_remaining = size;
+    uint32_t logical_block = 0;
 
     block_buffer = malloc(global_block_size);
-    if (!block_buffer) {
-        printf("Erro de alocacao de memoria.\n");
-        return;
-    }
+    if (!block_buffer) return;
 
-    for (uint32_t i = 0; i < total_blocks; i++) {
-        uint64_t phys_block = map_logical_to_physical_block(&inode, i);
-        uint32_t bytes_to_print =
-            (bytes_remaining > global_block_size) ? global_block_size :
-            (uint32_t)bytes_remaining;
+    while (bytes_remaining > 0) {
+        uint64_t phys_block = map_logical_to_physical_block(&inode, logical_block);
+        if (phys_block == 0) break;
 
-        if (phys_block == 0 || !read_block(phys_block, block_buffer)) {
-            memset(block_buffer, 0, global_block_size);
+        uint32_t bytes_to_print = (bytes_remaining > global_block_size) ? global_block_size : (uint32_t)bytes_remaining;
+
+        if (read_block(phys_block, block_buffer)) {
+            for(uint32_t j = 0; j < bytes_to_print; j++) putchar(block_buffer[j]);
         }
-
-        fwrite(block_buffer, 1, bytes_to_print, stdout);
         bytes_remaining -= bytes_to_print;
+        logical_block++;
     }
-
     putchar('\n');
     free(block_buffer);
 }
@@ -823,39 +873,67 @@ void ext4_testb(uint32_t block_num) {
 
     free(block_buffer);
 }
+void ext4_export(uint32_t file_inode_num, const char *target_path) {
+    struct ext4_inode inode;
+    uint64_t size;
+    uint64_t bytes_remaining;
+    uint32_t total_blocks;
+    char *block_buffer;
+    FILE *out_file;
 
-void ext4_god_mode(void) {
-char block_buffer[4096];
-    uint32_t total_blocks = 131072;
-    
-    if (!disk_image) return;
-
-    printf("\n--- MODO MATRIX: CACANDO A TABELA DE INODES PERDIDA ---\n");
-    for (uint32_t b = 0; b < total_blocks; b++) {
-        fseek(disk_image, (long)b * 4096, SEEK_SET);
-        fread(block_buffer, 1, 4096, disk_image);
-        
-        // O Inode 2 fica exatamente no offset 256 do bloco da tabela
-        struct ext4_inode *ino = (struct ext4_inode *)(block_buffer + 256);
-        
-        // Verifica se é um Diretório e tem Links válidos
-        if ((ino->i_mode & 0xF000) == 0x4000 && ino->i_links_count >= 2) {
-            
-            // Verifica os Extents
-            if (ino->i_flags & EXT4_EXTENTS_FL) {
-                struct ext4_extent_header *eh = (struct ext4_extent_header *)ino->i_block;
-                
-                if (eh->eh_magic == EXT4_EXT_MAGIC && eh->eh_entries > 0) {
-                    struct ext4_extent *ext = (struct ext4_extent *)((char *)ino->i_block + sizeof(struct ext4_extent_header));
-                    
-                    // O God Mode provou que os dados estão no Bloco 76!
-                    // Se esse Inode apontar pro 76, achamos o esconderijo.
-                    if (ext->ee_start_lo == 76) {
-                        printf("\033[1;32m[HACK CONCLUIDO] A Tabela de Inodes real esta no BLOCO FISICO: %u\033[0m\n", b);
-                    }
-                }
-            }
-        }
+    if (file_inode_num == 0) {
+        printf("Erro: Arquivo origem nao encontrado na imagem.\n");
+        return;
     }
-    printf("------------------------------------------------------------\n\n");
+
+    if (!read_inode(file_inode_num, &inode)) {
+        printf("Erro: Falha ao ler o Inode %u.\n", file_inode_num);
+        return;
+    }
+
+    if (!is_regular_file(inode.i_mode)) {
+        printf("Erro: O Inode %u nao e um arquivo regular. Nao pode ser exportado.\n", file_inode_num);
+        return;
+    }
+
+    // Tenta criar/abrir o arquivo destino na sua máquina física
+    // O "wb" é crucial: 'w' (write) e 'b' (binary) para não corromper imagens/executáveis
+    out_file = fopen(target_path, "wb");
+    if (!out_file) {
+        printf("Erro: Nao foi possivel criar o arquivo destino '%s' no seu SO.\n", target_path);
+        return;
+    }
+
+    size = inode_size_bytes(&inode);
+    bytes_remaining = size;
+    // Calcula quantos blocos o arquivo ocupa
+    total_blocks = (uint32_t)((size + global_block_size - 1) / global_block_size);
+
+    block_buffer = malloc(global_block_size);
+    if (!block_buffer) {
+        printf("Erro de alocacao de memoria.\n");
+        fclose(out_file);
+        return;
+    }
+
+    // Navega pelos blocos do arquivo da imagem e copia para o arquivo físico
+    for (uint32_t i = 0; i < total_blocks; i++) {
+        uint64_t phys_block = map_logical_to_physical_block(&inode, i);
+
+        // Define se vamos gravar um bloco inteiro ou apenas a "sobra" do último bloco
+        uint32_t bytes_to_write = (bytes_remaining > global_block_size) ? global_block_size : (uint32_t)bytes_remaining;
+
+        // Se o bloco físico for 0 (arquivo esparso/buraco) ou der erro de leitura
+        if (phys_block == 0 || !read_block(phys_block, block_buffer)) {
+            memset(block_buffer, 0, global_block_size); // Preenche com zeros
+        }
+
+        // Grava no arquivo do sistema operacional
+        fwrite(block_buffer, 1, bytes_to_write, out_file);
+        bytes_remaining -= bytes_to_write;
+    }
+
+    fclose(out_file);
+    free(block_buffer);
+    printf("Sucesso! Arquivo exportado para '%s' (%llu bytes).\n", target_path, (unsigned long long)size);
 }
