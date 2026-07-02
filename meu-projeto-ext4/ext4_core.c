@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <ctype.h>
+#include <unistd.h>
 #include "ext4_structures.c"
 
 #define EXT4_SUPER_OFFSET 1024ULL
@@ -183,6 +184,24 @@ static uint64_t read_group_block_pointer(uint32_t group, uint32_t lo_offset,
 int read_block(uint64_t block_num, void *buffer) {
     return read_at(block_num * (uint64_t)global_block_size, buffer, global_block_size);
 }
+int write_block(uint64_t block_num, void *buffer)
+{
+    if (!disk_image)
+        return 0;
+
+    uint64_t offset = block_num * global_block_size;
+
+    fseek(disk_image, offset, SEEK_SET);
+
+    if (fwrite(buffer, global_block_size, 1, disk_image) != 1)
+        return 0;
+
+    fflush(disk_image);
+    
+    fsync(fileno(disk_image));
+    return 1;
+
+}
 
 static uint64_t real_inode_table_block = 0;
 
@@ -303,7 +322,7 @@ int ext4_init(const char *image_path) {
     struct ext4_super_block sb;
     uint16_t magic = 0;
 
-    disk_image = fopen(image_path, "rb");
+    disk_image = fopen(image_path, "r+b");
     if (!disk_image) return 0;
 
     if (!read_at(EXT4_SUPER_OFFSET, &sb, sizeof(sb))) {
@@ -924,4 +943,246 @@ void ext4_export(uint32_t file_inode_num, const char *target_path) {
     fclose(out_file);
     free(block_buffer);
     printf("Sucesso! Arquivo exportado para '%s' (%llu bytes).\n", target_path, (unsigned long long)size);
+}
+
+// Operação: Renomeia um arquivo ou diretório dentro do diretório atual
+void ext4_rename(uint32_t dir_inode_num, const char *old_name, const char *new_name)
+{
+    if (!disk_image)
+        return;
+
+    if (!old_name || !new_name)
+        return;
+
+    if (strlen(new_name) > 255) {
+        printf("Erro: nome muito grande.\n");
+        return;
+    }
+
+    if (ext4_lookup(dir_inode_num, old_name) == 0) {
+        printf("Erro: '%s' não encontrado.\n", old_name);
+        return;
+    }
+
+    if (ext4_lookup(dir_inode_num, new_name) != 0) {
+        printf("Erro: já existe um arquivo chamado '%s'.\n", new_name);
+        return;
+    }
+
+    uint64_t block = heal_directory_block(dir_inode_num);
+
+    if (block == 0) {
+        printf("Erro: não foi possível localizar o bloco do diretório.\n");
+        return;
+    }
+
+    char *buffer = malloc(global_block_size);
+    if (!buffer)
+        return;
+
+    if (!read_block(block, buffer)) {
+        free(buffer);
+        return;
+    }
+
+    uint32_t offset = 0;
+
+    while (offset < global_block_size) {
+
+        struct ext4_dir_entry_2 *entry =
+            (struct ext4_dir_entry_2 *)(buffer + offset);
+
+        if (!valid_dir_entry(entry, offset))
+            break;
+
+        if (entry->inode != 0) {
+
+            char name[256];
+
+            memcpy(name, entry->name, entry->name_len);
+            name[entry->name_len] = '\0';
+
+            if (strcmp(name, old_name) == 0) {
+
+                uint16_t required =
+                    (uint16_t)((8 + strlen(new_name) + 3) & ~3);
+
+                if (required > entry->rec_len) {
+                    printf("Erro: não há espaço para o novo nome.\n");
+                    free(buffer);
+                    return;
+                }
+
+                memset(entry->name, 0, entry->rec_len - 8);
+
+                memcpy(entry->name,
+                       new_name,
+                       strlen(new_name));
+
+                entry->name_len = strlen(new_name);
+
+                if (!write_block(block, buffer)) {
+                    printf("Erro ao gravar o bloco.\n");
+                } else {
+                    printf("'%s' renomeado para '%s'.\n",
+                           old_name,
+                           new_name);
+                }
+
+                free(buffer);
+                return;
+            }
+        }
+
+        offset += entry->rec_len;
+    }
+
+    printf("Erro: entrada do diretório não encontrada.\n");
+
+    free(buffer);
+}
+
+// Devolve um bloco para o sistema (Zera no Block Bitmap)
+void ext4_free_block(uint32_t block_num) {
+    if (!disk_image) return;
+    uint32_t blocks_per_group, first_data_block;
+    uint16_t desc_size;
+
+    fseek(disk_image, 1024 + 32, SEEK_SET); fread(&blocks_per_group, sizeof(uint32_t), 1, disk_image);
+    fseek(disk_image, 1024 + 20, SEEK_SET); fread(&first_data_block, sizeof(uint32_t), 1, disk_image);
+    fseek(disk_image, 1024 + 254, SEEK_SET); fread(&desc_size, sizeof(uint16_t), 1, disk_image);
+    if (desc_size < 32 || desc_size > 1024) desc_size = 32;
+
+    uint32_t group = (block_num - first_data_block) / blocks_per_group;
+    uint32_t index = (block_num - first_data_block) % blocks_per_group;
+
+    uint64_t bgdt_offset = (global_block_size == 1024) ? 2048 : global_block_size;
+    uint64_t descriptor_offset = bgdt_offset + (group * desc_size);
+
+    uint32_t block_bitmap_block;
+    fseek(disk_image, descriptor_offset + 0, SEEK_SET);
+    fread(&block_bitmap_block, sizeof(uint32_t), 1, disk_image);
+
+    char *block_buffer = calloc(1, global_block_size);
+    read_block(block_bitmap_block, block_buffer);
+
+    block_buffer[index / 8] &= ~(1 << (index % 8));
+    
+    write_block(block_bitmap_block, block_buffer); 
+    free(block_buffer);
+}
+
+void ext4_free_inode(uint32_t inode_num) {
+    if (!disk_image) return;
+    uint32_t inodes_per_group;
+    uint16_t desc_size;
+
+    fseek(disk_image, 1024 + 40, SEEK_SET); 
+    fread(&inodes_per_group, sizeof(uint32_t), 1, disk_image);
+    
+    // As duas linhas abaixo foram separadas corretamente!
+    fseek(disk_image, 1024 + 254, SEEK_SET); 
+    fread(&desc_size, sizeof(uint16_t), 1, disk_image); 
+    if (desc_size < 32 || desc_size > 1024) desc_size = 32;
+
+    uint32_t group = (inode_num - 1) / inodes_per_group;
+    uint32_t index = (inode_num - 1) % inodes_per_group;
+
+    uint64_t bgdt_offset = (global_block_size == 1024) ? 2048 : global_block_size;
+    uint32_t inode_bitmap_block;
+    
+    fseek(disk_image, bgdt_offset + (group * desc_size) + 4, SEEK_SET);
+    fread(&inode_bitmap_block, sizeof(uint32_t), 1, disk_image);
+
+    char *block_buffer = calloc(1, global_block_size);
+    read_block(inode_bitmap_block, block_buffer);
+
+    block_buffer[index / 8] &= ~(1 << (index % 8));
+    
+    write_block(inode_bitmap_block, block_buffer);
+    free(block_buffer);
+}
+
+// Operação: Remove um diretório vazio (rmdir)
+void ext4_rmdir(uint32_t parent_inode_num, const char *dir_name) {
+    struct ext4_inode parent_inode;
+    if (!read_inode(parent_inode_num, &parent_inode)) return;
+
+    uint32_t target_inode_num = ext4_lookup(parent_inode_num, dir_name);
+    if (target_inode_num == 0) {
+        printf("Erro: O diretorio '%s' nao foi encontrado.\n", dir_name);
+        return;
+    }
+
+    struct ext4_inode target_inode;
+    read_inode(target_inode_num, &target_inode);
+
+    if ((target_inode.i_mode & 0xF000) != 0x4000) {
+        printf("Erro: '%s' e um ficheiro, nao um diretorio. O rmdir so apaga pastas.\n", dir_name);
+        return;
+    }
+
+    int entry_count = 0;
+    uint32_t dir_blocks = (target_inode.i_size_lo + global_block_size - 1) / global_block_size;
+    char *dir_buf = calloc(1, global_block_size);
+    
+    for(uint32_t i = 0; i < dir_blocks; i++) {
+        uint64_t pb = map_logical_to_physical_block(&target_inode, i);
+        if(pb == 0) continue;
+        read_block(pb, dir_buf);
+        uint32_t offset = 0;
+        while(offset < global_block_size) {
+            uint32_t *e_ino = (uint32_t *)(dir_buf + offset);
+            uint16_t *e_rec_len = (uint16_t *)(dir_buf + offset + 4);
+            if(*e_rec_len == 0) break;
+            if(*e_ino != 0) entry_count++; // Conta as entradas ativas
+            offset += *e_rec_len;
+        }
+    }
+    free(dir_buf);
+    
+    if (entry_count > 2) {
+        printf("Erro: O diretorio '%s' nao esta vazio. Nao pode ser apagado.\n", dir_name);
+        return;
+    }
+
+
+    for (uint32_t i = 0; i < dir_blocks; i++) {
+        uint64_t phys_block = map_logical_to_physical_block(&target_inode, i);
+        if (phys_block != 0) ext4_free_block(phys_block);
+    }
+
+    ext4_free_inode(target_inode_num);
+
+    uint32_t parent_blocks = (parent_inode.i_size_lo + global_block_size - 1) / global_block_size;
+    char *block_buffer = calloc(1, global_block_size);
+    int deleted = 0;
+
+    for (uint32_t i = 0; i < parent_blocks && !deleted; i++) {
+        uint64_t phys_block = map_logical_to_physical_block(&parent_inode, i);
+        if (phys_block == 0) continue;
+
+        read_block(phys_block, block_buffer);
+        uint32_t offset = 0;
+
+        while (offset < global_block_size) {
+            uint32_t *entry_inode = (uint32_t *)(block_buffer + offset);
+            uint16_t *rec_len     = (uint16_t *)(block_buffer + offset + 4);
+            uint8_t  *name_len    = (uint8_t  *)(block_buffer + offset + 6);
+            char     *name        = (char     *)(block_buffer + offset + 8);
+
+            if (*rec_len == 0) break;
+
+            // Encontrou o nome na pasta pai? Apaga a referência
+            if (*entry_inode == target_inode_num && *name_len == strlen(dir_name) && strncmp(name, dir_name, *name_len) == 0) {
+                *entry_inode = 0; // O Inode 0 significa "Entrada livre/apagada" no EXT4
+                write_block(phys_block, block_buffer);
+                deleted = 1;
+                break;
+            }
+            offset += *rec_len;
+        }
+    }
+    free(block_buffer);
+    printf("Sucesso: Diretorio '%s' foi removido do disco!\n", dir_name);
 }

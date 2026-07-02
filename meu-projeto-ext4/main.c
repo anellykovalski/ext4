@@ -44,6 +44,8 @@ void execute_command(char *line, ShellState *state) {
         printf("  testi <num> - Verifica se um inode esta livre ou ocupado\n");
         printf("  testb <num> - Verifica se um bloco esta livre ou ocupado\n");
         printf("  export <src> <tgt> - Copia um arquivo da imagem EXT4 para a maquina real\n");
+        printf("  rename <file> <newfilename> - Renomeia um arquivo file para newfilename\n");
+        printf("  rmdir <dir> - Remove um diretório, se vazio\n");
     } 
     else if (strcmp(cmd, "ls") == 0) {
         ext4_readdir(state->current_inode);
@@ -139,6 +141,20 @@ void execute_command(char *line, ShellState *state) {
         printf("Fechando interpretador EXT4. Até mais!\n");
         exit(0);
     } 
+    else if (strcmp(cmd, "rename") == 0){
+        if (arg_count < 3) {
+            printf("Uso: rename <nome_antigo> <nome_novo>\n");
+            return;
+        }
+        ext4_rename(state->current_inode, args[1], args[2]);
+    }
+    else if (strcmp(cmd, "rmdir") == 0) {
+        if (arg_count < 2) {
+            printf("Uso: rmdir <nome_do_diretorio>\n");
+            return;
+        }
+        ext4_rmdir(state->current_inode, args[1]);
+    }
     else {
         printf("Comando desconhecido: '%s'. Digite 'help' para comandos válidos.\n", cmd);
     }
