@@ -44,6 +44,8 @@ void execute_command(char *line, ShellState *state) {
         printf("  testi <num> - Verifica se um inode esta livre ou ocupado\n");
         printf("  testb <num> - Verifica se um bloco esta livre ou ocupado\n");
         printf("  export <src> <tgt> - Copia um arquivo da imagem EXT4 para a maquina real\n");
+        printf("  rename <file> <newfilename> - Renomeia um arquivo file para newfilename\n");
+        printf("  rmdir <dir> - Remove um diretório, se vazio\n");
     } 
     else if (strcmp(cmd, "ls") == 0) {
         ext4_readdir(state->current_inode);
@@ -56,17 +58,35 @@ void execute_command(char *line, ShellState *state) {
 
         uint32_t target_inode = ext4_lookup(state->current_inode, args[1]);
         if (target_inode == 0) {
-            printf("Erro: O diretório '%s' não existe.\n", args[1]);
+            printf("Erro: O diretorio '%s' nao existe.\n", args[1]);
         } else {
+            // Atualiza o Inode na memória (A parte que já funcionava)
             state->current_inode = target_inode;
+            
+            // --- ATUALIZA A STRING VISUAL DO PROMPT DE FORMA INTELIGENTE ---
             if (strcmp(args[1], "..") == 0) {
-                strcpy(state->current_path, "/");
-                // Simplificação ao voltar
-            } else if (strcmp(args[1], ".") != 0) {
+                // Só recorta se não estivermos já na raiz
                 if (strcmp(state->current_path, "/") != 0) {
-                    strcat(state->current_path, "/");
+                    // strrchr acha a ÚLTIMA ocorrência da barra '/'
+                    char *last_slash = strrchr(state->current_path, '/');
+                    if (last_slash != NULL) {
+                        if (last_slash == state->current_path) {
+                            // Se cortou até a primeira barra, vira apenas "/"
+                            strcpy(state->current_path, "/");
+                        } else {
+                            // Coloca o \0 no lugar da barra para "cortar" a string ali
+                            *last_slash = '\0'; 
+                        }
+                    }
                 }
-                strcat(state->current_path, args[1]);
+            } else if (strcmp(args[1], ".") != 0) {
+                // Entrando numa pasta nova (acrescenta no final)
+                if (strcmp(state->current_path, "/") == 0) {
+                    sprintf(state->current_path, "/%s", args[1]);
+                } else {
+                    strcat(state->current_path, "/");
+                    strcat(state->current_path, args[1]);
+                }
             }
         }
     }
@@ -139,6 +159,20 @@ void execute_command(char *line, ShellState *state) {
         printf("Fechando interpretador EXT4. Até mais!\n");
         exit(0);
     } 
+    else if (strcmp(cmd, "rename") == 0){
+        if (arg_count < 3) {
+            printf("Uso: rename <nome_antigo> <nome_novo>\n");
+            return;
+        }
+        ext4_rename(state->current_inode, args[1], args[2]);
+    }
+    else if (strcmp(cmd, "rmdir") == 0) {
+        if (arg_count < 2) {
+            printf("Uso: rmdir <nome_do_diretorio>\n");
+            return;
+        }
+        ext4_rmdir(state->current_inode, args[1]);
+    }
     else {
         printf("Comando desconhecido: '%s'. Digite 'help' para comandos válidos.\n", cmd);
     }
