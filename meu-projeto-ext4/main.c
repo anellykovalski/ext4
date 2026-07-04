@@ -14,11 +14,11 @@ typedef struct {
 
 // Processador de Comandos do Interpretador
 void execute_command(char *line, ShellState *state) {
-    // 1. CORREÇÃO CRÍTICA: Remove tanto o \n quanto o \r
+    // 1. Remove tanto o \n quanto o \r
     line[strcspn(line, "\r\n")] = 0;
     if (strlen(line) == 0) return; // Se for linha vazia, apenas ignora
 
-    // 2. CORREÇÃO: Usa \r e \n no delimitador do strtok por segurança
+    // 2. Usa \r e \n no delimitador do strtok por segurança
     char *args[MAX_ARGS];
     int arg_count = 0;
 
@@ -44,6 +44,9 @@ void execute_command(char *line, ShellState *state) {
         printf("  testi <num> - Verifica se um inode esta livre ou ocupado\n");
         printf("  testb <num> - Verifica se um bloco esta livre ou ocupado\n");
         printf("  export <src> <tgt> - Copia um arquivo da imagem EXT4 para a maquina real\n");
+        printf("  touch <nome>- Cria um arquivo regular vazio no diretorio atual\n");
+        printf("  mkdir <nome>- Cria um novo diretorio vazio no diretorio atual\n");
+        printf("  rm <nome>   - Remove um arquivo regular do diretorio atual\n");
         printf("  rename <file> <newfilename> - Renomeia um arquivo file para newfilename\n");
         printf("  rmdir <dir> - Remove um diretório, se vazio\n");
     } 
@@ -58,49 +61,76 @@ void execute_command(char *line, ShellState *state) {
 
         uint32_t target_inode = ext4_lookup(state->current_inode, args[1]);
         if (target_inode == 0) {
-            printf("Erro: O diretorio '%s' nao existe.\n", args[1]);
+            printf("Erro: O diretório '%s' não existe.\n", args[1]);
         } else {
-            // Atualiza o Inode na memória (A parte que já funcionava)
             state->current_inode = target_inode;
-            
-            // --- ATUALIZA A STRING VISUAL DO PROMPT DE FORMA INTELIGENTE ---
             if (strcmp(args[1], "..") == 0) {
-                // Só recorta se não estivermos já na raiz
-                if (strcmp(state->current_path, "/") != 0) {
-                    // strrchr acha a ÚLTIMA ocorrência da barra '/'
-                    char *last_slash = strrchr(state->current_path, '/');
-                    if (last_slash != NULL) {
-                        if (last_slash == state->current_path) {
-                            // Se cortou até a primeira barra, vira apenas "/"
-                            strcpy(state->current_path, "/");
-                        } else {
-                            // Coloca o \0 no lugar da barra para "cortar" a string ali
-                            *last_slash = '\0'; 
-                        }
-                    }
-                }
+                // Lógica simples para voltar (em um shell real atualizaríamos a string com precisão)
+                strcpy(state->current_path, "/");
             } else if (strcmp(args[1], ".") != 0) {
-                // Entrando numa pasta nova (acrescenta no final)
-                if (strcmp(state->current_path, "/") == 0) {
-                    sprintf(state->current_path, "/%s", args[1]);
-                } else {
+                if (strcmp(state->current_path, "/") != 0) {
                     strcat(state->current_path, "/");
-                    strcat(state->current_path, args[1]);
                 }
+                strcat(state->current_path, args[1]);
             }
         }
+    }
+    else if (strcmp(cmd, "touch") == 0) {
+        if (arg_count < 2) {
+            printf("Uso: touch <nome_do_arquivo>\n");
+            return;
+        }
+        ext4_touch(state->current_inode, args[1]);
+    }
+    else if (strcmp(cmd, "mkdir") == 0) {
+        if (arg_count < 2) {
+            printf("Uso: mkdir <nome_do_diretorio>\n");
+            return;
+        }
+        ext4_mkdir(state->current_inode, args[1]);
+    }
+    else if (strcmp(cmd, "rm") == 0) {
+        if (arg_count < 2) {
+            printf("Uso: rm <nome_do_arquivo>\n");
+            return;
+        }
+        ext4_rm(state->current_inode, args[1]);
     }
     else if (strcmp(cmd, "attr") == 0) {
         if (arg_count < 2) {
             printf("Uso: attr <nome_do_arquivo_ou_diretorio>\n");
             return;
         }
-        uint32_t target_inode = ext4_lookup(state->current_inode, args[1]);
+
+        // Reconstrói o nome completo unindo args[1], args[2], etc. com espaços
+        char full_name[256] = "";
+        for (int i = 1; i < arg_count; i++) {
+            strncat(full_name, args[i], sizeof(full_name) - strlen(full_name) - 1);
+            if (i < arg_count - 1) {
+                strncat(full_name, " ", sizeof(full_name) - strlen(full_name) - 1);
+            }
+        }
+
+        uint32_t target_inode = ext4_lookup(state->current_inode, full_name);
         if (target_inode == 0) {
-            printf("Erro: Arquivo ou diretório '%s' não encontrado.\n", args[1]);
+            printf("Erro: Arquivo ou diretório '%s' não encontrado.\n", full_name);
         } else {
             ext4_attr(target_inode);
         }
+    }
+    else if (strcmp(cmd, "rename") == 0){
+        if (arg_count < 3) {
+            printf("Uso: rename <nome_antigo> <nome_novo>\n");
+            return;
+        }
+        ext4_rename(state->current_inode, args[1], args[2]);
+    }
+    else if (strcmp(cmd, "rmdir") == 0) {
+        if (arg_count < 2) {
+            printf("Uso: rmdir <nome_do_diretorio>\n");
+            return;
+        }
+        ext4_rmdir(state->current_inode, args[1]);
     }
     else if (strcmp(cmd, "cat") == 0) {
         if (arg_count < 2) {
@@ -120,13 +150,11 @@ void execute_command(char *line, ShellState *state) {
             return;
         }
 
-        // Procura o arquivo dentro do diretório que o shell está atualmente
         uint32_t source_inode = ext4_lookup(state->current_inode, args[1]);
 
         if (source_inode == 0) {
             printf("Erro: Arquivo '%s' nao encontrado no diretorio atual da imagem.\n", args[1]);
         } else {
-            // Chama a função passando o Inode encontrado e o caminho alvo
             ext4_export(source_inode, args[2]);
         }
     }
@@ -159,39 +187,22 @@ void execute_command(char *line, ShellState *state) {
         printf("Fechando interpretador EXT4. Até mais!\n");
         exit(0);
     } 
-    else if (strcmp(cmd, "rename") == 0){
-        if (arg_count < 3) {
-            printf("Uso: rename <nome_antigo> <nome_novo>\n");
-            return;
-        }
-        ext4_rename(state->current_inode, args[1], args[2]);
-    }
-    else if (strcmp(cmd, "rmdir") == 0) {
-        if (arg_count < 2) {
-            printf("Uso: rmdir <nome_do_diretorio>\n");
-            return;
-        }
-        ext4_rmdir(state->current_inode, args[1]);
-    }
     else {
         printf("Comando desconhecido: '%s'. Digite 'help' para comandos válidos.\n", cmd);
     }
 }
 
 int main(int argc, char *argv[]) {
-    // Validação de argumento inicial
     if (argc < 2) {
         fprintf(stderr, "Erro de Execução!\nUso correto: %s <caminho_da_imagem_ext4>\n", argv[0]);
         return 1;
     }
 
-    // Inicializa o leitor EXT4 apontando para a imagem informada
     if (!ext4_init(argv[1])) {
         fprintf(stderr, "Erro Crítico: Não foi possível abrir o arquivo de imagem '%s'.\n", argv[1]);
         return 1;
     }
 
-    // Estado Inicial do Shell (A raiz de qualquer sistema EXT4 é sempre o Inode 2)
     ShellState state;
     state.current_inode = 2;
     strcpy(state.current_path, "/");
@@ -203,15 +214,12 @@ int main(int argc, char *argv[]) {
     printf("=========================================\n");
     printf("Digite 'help' para listar os comandos disponíveis.\n\n");
 
-    // Loop Principal (REPL: Read, Evaluate, Print, Loop)
     while (1) {
         printf("ext4_user@sistema:%s$ ", state.current_path);
         fflush(stdout);
 
-        // Captura o comando do usuário de forma segura sem estourar o buffer
         if (fgets(input_buffer, sizeof(input_buffer), stdin) == NULL) {
             break;
-            // Sai se pressionado Ctrl+D (EOF)
         }
 
         execute_command(input_buffer, &state);
