@@ -58,17 +58,35 @@ void execute_command(char *line, ShellState *state) {
 
         uint32_t target_inode = ext4_lookup(state->current_inode, args[1]);
         if (target_inode == 0) {
-            printf("Erro: O diretório '%s' não existe.\n", args[1]);
+            printf("Erro: O diretorio '%s' nao existe.\n", args[1]);
         } else {
+            // Atualiza o Inode na memória (A parte que já funcionava)
             state->current_inode = target_inode;
+            
+            // --- ATUALIZA A STRING VISUAL DO PROMPT DE FORMA INTELIGENTE ---
             if (strcmp(args[1], "..") == 0) {
-                strcpy(state->current_path, "/");
-                // Simplificação ao voltar
-            } else if (strcmp(args[1], ".") != 0) {
+                // Só recorta se não estivermos já na raiz
                 if (strcmp(state->current_path, "/") != 0) {
-                    strcat(state->current_path, "/");
+                    // strrchr acha a ÚLTIMA ocorrência da barra '/'
+                    char *last_slash = strrchr(state->current_path, '/');
+                    if (last_slash != NULL) {
+                        if (last_slash == state->current_path) {
+                            // Se cortou até a primeira barra, vira apenas "/"
+                            strcpy(state->current_path, "/");
+                        } else {
+                            // Coloca o \0 no lugar da barra para "cortar" a string ali
+                            *last_slash = '\0'; 
+                        }
+                    }
                 }
-                strcat(state->current_path, args[1]);
+            } else if (strcmp(args[1], ".") != 0) {
+                // Entrando numa pasta nova (acrescenta no final)
+                if (strcmp(state->current_path, "/") == 0) {
+                    sprintf(state->current_path, "/%s", args[1]);
+                } else {
+                    strcat(state->current_path, "/");
+                    strcat(state->current_path, args[1]);
+                }
             }
         }
     }

@@ -1103,86 +1103,86 @@ void ext4_free_inode(uint32_t inode_num) {
     free(block_buffer);
 }
 
-// Operação: Remove um diretório vazio (rmdir)
+// Operação: Remove um diretório vazio (rmdir) - VERSÃO BLINDADA
 void ext4_rmdir(uint32_t parent_inode_num, const char *dir_name) {
-    struct ext4_inode parent_inode;
-    if (!read_inode(parent_inode_num, &parent_inode)) return;
-
     uint32_t target_inode_num = ext4_lookup(parent_inode_num, dir_name);
     if (target_inode_num == 0) {
         printf("Erro: O diretorio '%s' nao foi encontrado.\n", dir_name);
         return;
     }
 
-    struct ext4_inode target_inode;
-    read_inode(target_inode_num, &target_inode);
-
-    if ((target_inode.i_mode & 0xF000) != 0x4000) {
-        printf("Erro: '%s' e um ficheiro, nao um diretorio. O rmdir so apaga pastas.\n", dir_name);
+    uint64_t target_phys_block = heal_directory_block(target_inode_num);
+    if (target_phys_block == 0) {
+        printf("Erro: '%s' nao e um diretorio.\n", dir_name);
         return;
     }
 
     int entry_count = 0;
-    uint32_t dir_blocks = (target_inode.i_size_lo + global_block_size - 1) / global_block_size;
     char *dir_buf = calloc(1, global_block_size);
-    
-    for(uint32_t i = 0; i < dir_blocks; i++) {
-        uint64_t pb = map_logical_to_physical_block(&target_inode, i);
-        if(pb == 0) continue;
-        read_block(pb, dir_buf);
+    if (read_block(target_phys_block, dir_buf)) {
         uint32_t offset = 0;
-        while(offset < global_block_size) {
-            uint32_t *e_ino = (uint32_t *)(dir_buf + offset);
-            uint16_t *e_rec_len = (uint16_t *)(dir_buf + offset + 4);
-            if(*e_rec_len == 0) break;
-            if(*e_ino != 0) entry_count++; // Conta as entradas ativas
-            offset += *e_rec_len;
+        while (offset < global_block_size) {
+            struct ext4_dir_entry_2 *entry = (struct ext4_dir_entry_2 *)(dir_buf + offset);
+            if (entry->rec_len == 0) break;
+            if (entry->inode != 0) entry_count++;
+            offset += entry->rec_len;
         }
     }
     free(dir_buf);
-    
+
     if (entry_count > 2) {
-        printf("Erro: O diretorio '%s' nao esta vazio. Nao pode ser apagado.\n", dir_name);
+        printf("Erro: O diretorio '%s' nao esta vazio.\n", dir_name);
         return;
     }
 
-
-    for (uint32_t i = 0; i < dir_blocks; i++) {
-        uint64_t phys_block = map_logical_to_physical_block(&target_inode, i);
-        if (phys_block != 0) ext4_free_block(phys_block);
+    uint64_t parent_phys_block = heal_directory_block(parent_inode_num);
+    if (parent_phys_block == 0) {
+        printf("Erro: Nao foi possivel localizar o bloco do diretorio pai.\n");
+        return;
     }
 
-    ext4_free_inode(target_inode_num);
-
-    uint32_t parent_blocks = (parent_inode.i_size_lo + global_block_size - 1) / global_block_size;
     char *block_buffer = calloc(1, global_block_size);
     int deleted = 0;
 
-    for (uint32_t i = 0; i < parent_blocks && !deleted; i++) {
-        uint64_t phys_block = map_logical_to_physical_block(&parent_inode, i);
-        if (phys_block == 0) continue;
-
-        read_block(phys_block, block_buffer);
+    if (read_block(parent_phys_block, block_buffer)) {
         uint32_t offset = 0;
+        struct ext4_dir_entry_2 *prev = NULL;
 
         while (offset < global_block_size) {
-            uint32_t *entry_inode = (uint32_t *)(block_buffer + offset);
-            uint16_t *rec_len     = (uint16_t *)(block_buffer + offset + 4);
-            uint8_t  *name_len    = (uint8_t  *)(block_buffer + offset + 6);
-            char     *name        = (char     *)(block_buffer + offset + 8);
+            struct ext4_dir_entry_2 *entry = (struct ext4_dir_entry_2 *)(block_buffer + offset);
+            if (entry->rec_len == 0) break;
 
-            if (*rec_len == 0) break;
+            if (entry->inode == target_inode_num &&
+                entry->name_len == strlen(dir_name) &&
+                memcmp(entry->name, dir_name, entry->name_len) == 0) 
+            {
+                // Absorve o espaço apagado juntando com o arquivo anterior
+                if (prev != NULL) {
+                    prev->rec_len += entry->rec_len; 
+                } 
+                
+                // Zera o inode da entrada apagada para evitar fantasmas
+                entry->inode = 0; 
 
-            // Encontrou o nome na pasta pai? Apaga a referência
-            if (*entry_inode == target_inode_num && *name_len == strlen(dir_name) && strncmp(name, dir_name, *name_len) == 0) {
-                *entry_inode = 0; // O Inode 0 significa "Entrada livre/apagada" no EXT4
-                write_block(phys_block, block_buffer);
+                // Salva a alteração fisicamente no HD
+                write_block(parent_phys_block, block_buffer); 
                 deleted = 1;
                 break;
             }
-            offset += *rec_len;
+
+            prev = entry;
+            offset += entry->rec_len;
         }
     }
     free(block_buffer);
-    printf("Sucesso: Diretorio '%s' foi removido do disco!\n", dir_name);
+
+    if (!deleted) {
+        printf("Erro: nao foi possivel remover a entrada do diretorio pai.\n");
+        return;
+    }
+
+    // 5. Devolve o bloco e o Inode para o sistema operacional
+    ext4_free_block(target_phys_block);
+    ext4_free_inode(target_inode_num);
+
 }
