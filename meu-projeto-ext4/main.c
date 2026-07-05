@@ -1,4 +1,4 @@
-#include <stdio.h>
+#include<stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "ext4_core.c" // Puxa todas as funções e estruturas automaticamente
@@ -61,12 +61,21 @@ void execute_command(char *line, ShellState *state) {
 
         uint32_t target_inode = ext4_lookup(state->current_inode, args[1]);
         if (target_inode == 0) {
-            printf("Erro: O diretório '%s' não existe.\n", args[1]);
+            printf("Erro: O diretorio '%s' nao existe.\n", args[1]);
         } else {
             state->current_inode = target_inode;
+            
             if (strcmp(args[1], "..") == 0) {
-                // Lógica simples para voltar (em um shell real atualizaríamos a string com precisão)
-                strcpy(state->current_path, "/");
+                if (strcmp(state->current_path, "/") != 0) {
+                    char *last_slash = strrchr(state->current_path, '/');
+                    if (last_slash != NULL) {
+                        if (last_slash == state->current_path) {
+                            *(last_slash + 1) = '\0';
+                        } else {
+                            *last_slash = '\0';
+                        }
+                    }
+                }
             } else if (strcmp(args[1], ".") != 0) {
                 if (strcmp(state->current_path, "/") != 0) {
                     strcat(state->current_path, "/");
@@ -132,18 +141,27 @@ void execute_command(char *line, ShellState *state) {
         }
         ext4_rmdir(state->current_inode, args[1]);
     }
-    else if (strcmp(cmd, "cat") == 0) {
+else if (strcmp(cmd, "cat") == 0) {
         if (arg_count < 2) {
             printf("Uso: cat <nome_do_arquivo>\n");
             return;
         }
-        uint32_t file_inode = ext4_lookup(state->current_inode, args[1]);
+
+        char full_name[256] = "";
+        for (int i = 1; i < arg_count; i++) {
+            strncat(full_name, args[i], sizeof(full_name) - strlen(full_name) - 1);
+            if (i < arg_count - 1) {
+                strncat(full_name, " ", sizeof(full_name) - strlen(full_name) - 1);
+            }
+        }
+
+        uint32_t file_inode = ext4_lookup(state->current_inode, full_name);
         if (file_inode == 0) {
-            printf("Erro: Arquivo '%s' não encontrado.\n", args[1]);
+            printf("Erro: Arquivo '%s' não encontrado.\n", full_name);
         } else {
             ext4_cat(file_inode);
         }
-    } 
+    }
     else if (strcmp(cmd, "export") == 0) {
         if (arg_count < 3) {
             printf("Uso: export <arquivo_origem_na_imagem> <caminho_destino_no_seu_pc>\n");
@@ -184,9 +202,12 @@ void execute_command(char *line, ShellState *state) {
         ext4_testb(block_num);
     }
     else if (strcmp(cmd, "exit") == 0) {
-        printf("Fechando interpretador EXT4. Até mais!\n");
+        printf("Fechando interpretador EXT4. Ate mais!\n");
+        if (disk_image) {
+            fclose(disk_image);
+        }
         exit(0);
-    } 
+    }
     else {
         printf("Comando desconhecido: '%s'. Digite 'help' para comandos válidos.\n", cmd);
     }

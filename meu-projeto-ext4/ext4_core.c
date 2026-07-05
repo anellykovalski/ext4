@@ -847,13 +847,19 @@ void ext4_cat(uint32_t file_inode_num) {
 
     while (bytes_remaining > 0) {
         uint64_t phys_block = map_logical_to_physical_block(&inode, logical_block);
-        if (phys_block == 0) break;
-
+        
         uint32_t bytes_to_print = (bytes_remaining > global_block_size) ? global_block_size : (uint32_t)bytes_remaining;
 
-        if (read_block(phys_block, block_buffer)) {
-            for(uint32_t j = 0; j < bytes_to_print; j++) putchar(block_buffer[j]);
+        // Se o bloco físico for 0 (arquivo esparso/buraco) ou der erro de leitura
+        if (phys_block == 0 || !read_block(phys_block, block_buffer)) {
+            memset(block_buffer, 0, global_block_size); // Preenche com zeros virtuais
         }
+
+        // Imprime na tela o conteúdo
+        for(uint32_t j = 0; j < bytes_to_print; j++) {
+            putchar(block_buffer[j]);
+        }
+        
         bytes_remaining -= bytes_to_print;
         logical_block++;
     }
