@@ -948,10 +948,16 @@ void ext4_attr(uint32_t inode_num) {
         printf("Usa Extents:             Nao\n");
     }
 
-    printf("atime:                   %u\n", inode.i_atime);
-    printf("ctime:                   %u\n", inode.i_ctime);
-    printf("mtime:                   %u\n", inode.i_mtime);
-    printf("dtime:                   %u\n", inode.i_dtime);
+    //vivian: transforma timestamp em data legivel
+    time_t at = (time_t)inode.i_atime;
+    time_t ct = (time_t)inode.i_ctime;
+    time_t mt = (time_t)inode.i_mtime;
+    time_t dt = (time_t)inode.i_dtime;
+
+    printf("atime:                   %s", inode.i_atime ? ctime(&at) : "0\n");
+    printf("ctime:                   %s", inode.i_ctime ? ctime(&ct) : "0\n");
+    printf("mtime:                   %s", inode.i_mtime ? ctime(&mt) : "0\n");
+    printf("dtime:                   %s", inode.i_dtime ? ctime(&dt) : "0\n");
     printf("----------------------------------------\n\n");
 }
 
@@ -1085,6 +1091,144 @@ void ext4_export(uint32_t file_inode_num, const char *target_path) {
     fclose(out_file);
     free(block_buffer);
     printf("Sucesso! Arquivo exportado para '%s' (%llu bytes).\n", target_path, (unsigned long long)size);
+}
+
+void ext4_import(const char *host_path, const char *dest_name, uint32_t parent_dir_inode) {
+    if (!disk_image || !host_path || !dest_name) return;
+
+    if (ext4_lookup(parent_dir_inode, dest_name) != 0) {
+        printf("Erro: O arquivo '%s' ja existe no diretorio atual.\n", dest_name);
+        return;
+    }
+
+    FILE *src = fopen(host_path, "rb");
+    if (!src) {
+        printf("Erro: Nao foi possivel abrir o arquivo '%s' no sistema hospedeiro.\n", host_path);
+        return;
+    }
+
+    fseek(src, 0, SEEK_END);
+    long file_size_long = ftell(src);
+    fseek(src, 0, SEEK_SET);
+
+    if (file_size_long < 0) {
+        printf("Erro: Nao foi possivel determinar o tamanho do arquivo.\n");
+        fclose(src);
+        return;
+    }
+
+    uint32_t file_size = (uint32_t)file_size_long;
+    uint32_t blocks_needed = (file_size > 0) ? (file_size + global_block_size - 1) / global_block_size : 0;
+
+    if (blocks_needed > 4 * 32768) {
+        printf("Erro: Arquivo muito grande para os extents suportados.\n");
+        fclose(src);
+        return;
+    }
+
+    uint32_t new_ino = alloc_free_inode();
+    if (!new_ino) {
+        printf("Erro: Sem Inodes livres no disco.\n");
+        fclose(src);
+        return;
+    }
+
+    uint32_t *allocated_blocks = NULL;
+    if (blocks_needed > 0) {
+        allocated_blocks = malloc(blocks_needed * sizeof(uint32_t));
+        if (!allocated_blocks) {
+            printf("Erro de alocacao de memoria.\n");
+            ext4_free_inode(new_ino);
+            fclose(src);
+            return;
+        }
+    }
+
+    char *buf = malloc(global_block_size);
+    if (!buf) {
+        printf("Erro de alocacao de memoria.\n");
+        if (allocated_blocks) free(allocated_blocks);
+        ext4_free_inode(new_ino);
+        fclose(src);
+        return;
+    }
+
+    for (uint32_t i = 0; i < blocks_needed; i++) {
+        allocated_blocks[i] = alloc_free_block();
+        if (allocated_blocks[i] == 0) {
+            printf("Erro: Sem blocos livres (alocou %u de %u).\n", i, blocks_needed);
+            //rollback 
+            for (uint32_t j = 0; j < i; j++) ext4_free_block(allocated_blocks[j]); //libera blocos alocados pelo import, evita lixo
+            ext4_free_inode(new_ino); //libera inode alocado pelo import
+            free(allocated_blocks); //libera alocacao de memoria
+            free(buf);
+            fclose(src);
+            return;
+        }
+
+        // Lê do arquivo do sistema hospedeiro e grava na imagem
+        memset(buf, 0, global_block_size);
+        fread(buf, 1, global_block_size, src);
+        write_block(allocated_blocks[i], buf);
+    }
+    free(buf);
+    fclose(src);
+
+    struct ext4_inode ino;
+    memset(&ino, 0, sizeof(ino));
+    ino.i_mode = 0x81A4;
+    ino.i_links_count = 1;
+    ino.i_size_lo = file_size;
+    ino.i_blocks_lo = blocks_needed * (global_block_size / 512);
+    ino.i_flags = EXT4_EXTENTS_FL;
+
+    //Indica informações sobre a estrutura de extents
+    struct ext4_extent_header *eh = (struct ext4_extent_header *)ino.i_block;
+    eh->eh_magic = EXT4_EXT_MAGIC;
+    eh->eh_entries = 0;
+    eh->eh_max = 4;
+    eh->eh_depth = 0;
+
+    if (blocks_needed > 0) {
+        struct ext4_extent *extents = (struct ext4_extent *)((char *)ino.i_block + sizeof(*eh));
+        uint32_t ext_idx = 0;
+        uint32_t run_start = 0;
+
+        for (uint32_t i = 1; i <= blocks_needed; i++) {
+            if (i == blocks_needed || allocated_blocks[i] != allocated_blocks[i - 1] + 1) {
+                if (ext_idx >= 4) {
+                    printf("Aviso: Fragmentacao excessiva, extents limitados a 4 faixas.\n");
+                    break;
+                }
+                extents[ext_idx].ee_block = run_start;
+                extents[ext_idx].ee_len = i - run_start;
+                extents[ext_idx].ee_start_hi = 0;
+                extents[ext_idx].ee_start_lo = allocated_blocks[run_start];
+                ext_idx++;
+                run_start = i;
+            }
+        }
+        eh->eh_entries = ext_idx;
+    }
+
+    write_inode(new_ino, &ino);
+    if (allocated_blocks) free(allocated_blocks);
+
+    if (add_dir_entry(parent_dir_inode, new_ino, dest_name, 1)) {
+        printf("Sucesso: Arquivo '%s' importado como Inode %u (%u bytes, %u blocos).\n",
+               dest_name, new_ino, file_size, blocks_needed);
+    } else {
+        if (blocks_needed > 0) {
+            struct ext4_extent *exts = (struct ext4_extent *)((char *)ino.i_block + sizeof(*eh));
+            for (uint16_t e = 0; e < eh->eh_entries; e++) {
+                for (uint32_t b = 0; b < exts[e].ee_len; b++) {
+                    ext4_free_block(exts[e].ee_start_lo + b);
+                }
+            }
+        }
+        ext4_free_inode(new_ino);
+        printf("Erro: Nao foi possivel vincular '%s' ao diretorio pai.\n", dest_name);
+    }
 }
 
 // ====================================================================
@@ -1254,6 +1398,7 @@ void ext4_rm(uint32_t parent_dir_inode, const char *filename) {
 
     if (target_inode_struct.i_links_count == 0) {
         target_inode_struct.i_dtime = (uint32_t)time(NULL);
+        target_inode_struct.i_mode = 0; //vivian: limpa o mode para o inode ficar LIVRE
 
         if ((target_inode_struct.i_flags & EXT4_EXTENTS_FL) && target_inode_struct.i_size_lo > 0) {
             struct ext4_extent_header *eh = (struct ext4_extent_header *)target_inode_struct.i_block;
@@ -1415,6 +1560,14 @@ void ext4_rmdir(uint32_t parent_inode_num, const char *dir_name) {
     if (!deleted) {
         printf("Erro: nao foi possivel remover a entrada do diretorio pai.\n");
         return;
+    }
+
+    struct ext4_inode target_inode_struct;
+    if (read_inode(target_inode_num, &target_inode_struct)) {
+        target_inode_struct.i_links_count = 0;
+        target_inode_struct.i_dtime = (uint32_t)time(NULL);
+        target_inode_struct.i_mode = 0; // limpa o mode para o inode ficar LIVRE
+        write_inode(target_inode_num, &target_inode_struct);
     }
 
     ext4_free_block(target_phys_block);

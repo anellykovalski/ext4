@@ -4,7 +4,7 @@
 #include "ext4_core.c" // Puxa todas as funções e estruturas automaticamente
 
 #define MAX_INPUT_SIZE 1024
-#define MAX_ARGS 5
+#define MAX_ARGS 50
 
 // Estado atual do Shell (Diretório que o usuário está navegando)
 typedef struct {
@@ -44,6 +44,7 @@ void execute_command(char *line, ShellState *state) {
         printf("  testi <num> - Verifica se um inode esta livre ou ocupado\n");
         printf("  testb <num> - Verifica se um bloco esta livre ou ocupado\n");
         printf("  export <src> <tgt> - Copia um arquivo da imagem EXT4 para a maquina real\n");
+        printf("  import <src> <tgt> - Copia um arquivo da maquina real para a imagem EXT4\n");
         printf("  touch <nome>- Cria um arquivo regular vazio no diretorio atual\n");
         printf("  mkdir <nome>- Cria um novo diretorio vazio no diretorio atual\n");
         printf("  rm <nome>   - Remove um arquivo regular do diretorio atual\n");
@@ -137,9 +138,19 @@ void execute_command(char *line, ShellState *state) {
             printf("Uso: cat <nome_do_arquivo>\n");
             return;
         }
-        uint32_t file_inode = ext4_lookup(state->current_inode, args[1]);
+
+        //vivian: suporte a arquivos com espaço no nome
+        char full_name[256] = "";
+        for (int i = 1; i < arg_count; i++) {
+            strncat(full_name, args[i], sizeof(full_name) - strlen(full_name) - 1);
+            if (i < arg_count - 1) {
+                strncat(full_name, " ", sizeof(full_name) - strlen(full_name) - 1);
+            }
+        }
+        uint32_t file_inode = ext4_lookup(state->current_inode, full_name);
+
         if (file_inode == 0) {
-            printf("Erro: Arquivo '%s' não encontrado.\n", args[1]);
+            printf("Erro: Arquivo '%s' não encontrado.\n", full_name);
         } else {
             ext4_cat(file_inode);
         }
@@ -157,6 +168,13 @@ void execute_command(char *line, ShellState *state) {
         } else {
             ext4_export(source_inode, args[2]);
         }
+    }
+    else if (strcmp(cmd, "import") == 0) {
+        if (arg_count < 3) {
+            printf("Uso: import <caminho_arquivo_no_pc> <nome_destino_na_imagem>\n");
+            return;
+        }
+        ext4_import(args[1], args[2], state->current_inode);
     }
     else if (strcmp(cmd, "info") == 0) {
         ext4_show_info();
